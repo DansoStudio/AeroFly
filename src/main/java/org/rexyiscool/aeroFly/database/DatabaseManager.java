@@ -325,12 +325,13 @@ public final class DatabaseManager {
 
     public synchronized void close(Collection<PlayerData> onlinePlayers) {
         try {
-            saveAllPlayers(onlinePlayers, true);
-
             dbExecutor.shutdown();
             if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
                 dbExecutor.shutdownNow();
             }
+
+            // Flush online players after dbExecutor stops so the shared SQLite connection is never used concurrently
+            saveAllPlayers(onlinePlayers, true);
 
             if (connection != null && !connection.isClosed()) {
                 connection.close();
