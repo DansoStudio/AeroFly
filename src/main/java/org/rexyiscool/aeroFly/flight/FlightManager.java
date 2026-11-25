@@ -11,6 +11,7 @@ import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.cacheddata.CachedPermissionData;
 import net.luckperms.api.query.QueryOptions;
+import net.luckperms.api.util.Tristate;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.World;
@@ -18,6 +19,8 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.permissions.Permission;
+import org.bukkit.permissions.PermissionDefault;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -99,10 +102,13 @@ public final class FlightManager implements Listener {
 
         // Load data for already-connected players (in case of plugin reload)
         for (Player onlinePlayer : Bukkit.getOnlinePlayers()) {
-            databaseManager.loadPlayerData(onlinePlayer.getUniqueId(), onlinePlayer.getName()).thenAccept(loaded -> {
-                playerCache.put(onlinePlayer.getUniqueId(), loaded);
-                initJoinedPlayer(onlinePlayer, loaded);
-            });
+            databaseManager.loadPlayerData(onlinePlayer.getUniqueId(), onlinePlayer.getName()).thenAccept(loaded ->
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (!onlinePlayer.isOnline()) return;
+                        playerCache.put(onlinePlayer.getUniqueId(), loaded);
+                        initJoinedPlayer(onlinePlayer, loaded);
+                    })
+            );
         }
 
         // 20 ticks (1s) flight charging loop
@@ -269,10 +275,35 @@ public final class FlightManager implements Listener {
             if (user == null) return fallbackRank;
             CachedPermissionData data = user.getCachedData().getPermissionData(lp.getContextManager().getStaticQueryOptions());
             for (Rank r : ranks) {
-                if (data.checkPermission(r.getPermission()).asBoolean()) return r;
+                if (hasOfflinePermission(data, r.getPermission())) return r;
             }
             return fallbackRank;
         }).exceptionally(ex -> fallbackRank);
+    }
+
+    /**
+     * Checks an offline LuckPerms user's permission, respecting plugin.yml default: true when undefined.
+     */
+    private boolean hasOfflinePermission(CachedPermissionData data, String permissionNode) {
+        Tristate state = data.checkPermission(permissionNode);
+        if (state != Tristate.UNDEFINED) {
+            return state.asBoolean();
+        }
+        Permission perm = Bukkit.getPluginManager().getPermission(permissionNode);
+        return perm != null && perm.getDefault() == PermissionDefault.TRUE;
+    }
+
+    public CompletableFuture<Boolean> hasOfflineBypassPermission(UUID uuid) {
+        LuckPerms lp = getLuckPerms();
+        if (lp == null) return CompletableFuture.completedFuture(false);
+
+        return lp.getUserManager().loadUser(uuid).thenApply(user -> {
+            if (user == null) return false;
+            CachedPermissionData data = user.getCachedData().getPermissionData(lp.getContextManager().getStaticQueryOptions());
+            return hasOfflinePermission(data, "aerofly.bypass.time")
+                    || hasOfflinePermission(data, "essentials.fly.bypass")
+                    || hasOfflinePermission(data, "aerofly.admin");
+        }).exceptionally(ex -> false);
     }
 
     public Set<String> getPlayerGroups(Player player) {
@@ -310,10 +341,16 @@ public final class FlightManager implements Listener {
         }).exceptionally(ex -> groups);
     }
 
+    public boolean hasBypassPermission(Player player) {
+        return player != null && (
+                player.hasPermission("aerofly.bypass.time") ||
+                player.hasPermission("essentials.fly.bypass") ||
+                player.hasPermission("aerofly.admin")
+        );
+    }
+
     public boolean hasUnlimitedFlight(Player player) {
-        if (player.hasPermission("aerofly.bypass.time") ||
-            player.hasPermission("essentials.fly.bypass") ||
-            player.hasPermission("aerofly.admin")) {
+        if (hasBypassPermission(player)) {
             return true;
         }
 
@@ -339,12 +376,18 @@ public final class FlightManager implements Listener {
 
     public boolean isFlightActive(Player player) {
         if (player == null) return false;
-        if (activeFlightPlayers.contains(player.getUniqueId())) return true;
-
-        return player.getAllowFlight();
+        if (!player.getAllowFlight()) {
+            activeFlightPlayers.remove(player.getUniqueId());
+            return false;
+        }
+        return true;
     }
 
     public boolean canFly(Player player) {
+        if (player == null) return false;
+        if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) {
+            return true;
+        }
         if (hasUnlimitedFlight(player)) {
             return true;
         }
@@ -533,17 +576,20 @@ public final class FlightManager implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.LOWEST)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
 
         PlayerData data = playerCache.get(uuid);
         if (data == null) {
-            databaseManager.loadPlayerData(uuid, player.getName()).thenAccept(loaded -> {
-                playerCache.put(uuid, loaded);
-                initJoinedPlayer(player, loaded);
-            });
+            databaseManager.loadPlayerData(uuid, player.getName()).thenAccept(loaded ->
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (!player.isOnline()) return;
+                        playerCache.put(uuid, loaded);
+                        initJoinedPlayer(player, loaded);
+                    })
+            );
         } else {
             data.setLastName(player.getName());
             initJoinedPlayer(player, data);
@@ -553,7 +599,9 @@ public final class FlightManager implements Listener {
     private void initJoinedPlayer(Player player, PlayerData data) {
         data.setLastChargeTimestamp(System.currentTimeMillis());
         long currentPeriod = getCurrentResetPeriodIndex();
-        if (currentPeriod > data.getLastResetPeriod()) {
+        if (data.getLastResetPeriod() == 0L) {
+            data.setLastResetPeriod(currentPeriod);
+        } else if (currentPeriod > data.getLastResetPeriod()) {
             data.resetDaily(currentPeriod);
             sendMessage(player, "daily-reset-notice");
         }
@@ -629,6 +677,8 @@ public final class FlightManager implements Listener {
                         player.setAllowFlight(true);
                     }
                 });
+            } else {
+                stopTrackingFlight(player);
             }
         }
 

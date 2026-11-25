@@ -398,7 +398,7 @@ public final class AeroFlyCommand implements CommandExecutor, TabCompleter {
             if (player != null) {
                 PlayerData data = flightManager.getPlayerData(player.getUniqueId());
                 Rank rank = flightManager.evaluatePlayerRank(player);
-                boolean bypass = player.hasPermission("aerofly.bypass.time");
+                boolean bypass = flightManager.hasBypassPermission(player);
                 List<Grant> grants = flightManager.getApplicableGrants(player.getUniqueId(), flightManager.getPlayerGroups(player));
                 runOnMain(() -> displayCheck(sender, player.getName(), player.getUniqueId(), rank, data, bypass, grants));
                 return;
@@ -407,10 +407,11 @@ public final class AeroFlyCommand implements CommandExecutor, TabCompleter {
 
         databaseManager.loadPlayerData(resolved.uuid(), resolved.name()).thenAccept(data ->
                 flightManager.evaluateOfflineRank(resolved.uuid()).thenAccept(rank ->
-                        flightManager.getOfflinePlayerGroups(resolved.uuid()).thenAccept(groups -> {
-                            List<Grant> grants = flightManager.getApplicableGrants(resolved.uuid(), groups);
-                            runOnMain(() -> displayCheck(sender, resolved.name(), resolved.uuid(), rank, data, false, grants));
-                        })));
+                        flightManager.hasOfflineBypassPermission(resolved.uuid()).thenAccept(bypass ->
+                                flightManager.getOfflinePlayerGroups(resolved.uuid()).thenAccept(groups -> {
+                                    List<Grant> grants = flightManager.getApplicableGrants(resolved.uuid(), groups);
+                                    runOnMain(() -> displayCheck(sender, resolved.name(), resolved.uuid(), rank, data, bypass, grants));
+                                }))));
     }
 
     private void displayCheck(CommandSender sender, String name, UUID uuid, Rank rank, PlayerData data, boolean bypass, List<Grant> grants) {
@@ -429,7 +430,7 @@ public final class AeroFlyCommand implements CommandExecutor, TabCompleter {
         flightManager.sendMessage(sender, "check-daily-remaining", Placeholder.unparsed("remaining", DurationParser.format(dailyRemaining)));
         flightManager.sendMessage(sender, "check-purchased", Placeholder.unparsed("purchased", DurationParser.format(purchased)));
         flightManager.sendMessage(sender, "check-total-finite", Placeholder.unparsed("total", DurationParser.format(dailyRemaining + purchased)));
-        flightManager.sendMessage(sender, "check-unlimited-active", Placeholder.unparsed("status", isUnlimited ? "<green>YES</green>" : "<red>NO</red>"));
+        flightManager.sendMessage(sender, "check-unlimited-active", Placeholder.parsed("status", isUnlimited ? "<green>YES</green>" : "<red>NO</red>"));
 
         if (isUnlimited) {
             displayGrantDetails(sender, bypass, grants);
@@ -440,7 +441,7 @@ public final class AeroFlyCommand implements CommandExecutor, TabCompleter {
     private void displayGrantDetails(CommandSender sender, boolean bypass, List<Grant> grants) {
         flightManager.sendMessage(sender, "check-grants-header");
         if (bypass) {
-            flightManager.sendRawMessage(sender, "<gray>  - <yellow>[PERMISSION]</yellow> aerofly.bypass.time | Permanent</gray>");
+            flightManager.sendRawMessage(sender, "<gray>  - <yellow>[PERMISSION]</yellow> bypass permission (aerofly.bypass.time / aerofly.admin / essentials.fly.bypass) | Permanent</gray>");
         }
         for (Grant g : grants) {
             flightManager.sendMessage(sender, "check-grant-item",
